@@ -1,0 +1,1 @@
+3c17d513c35ff7169c24a3059d6405363cfd47940c72426205fb2bf7d8c1ea54  ./target/wasm32-unknown-unknown/release/prism_forge.wasm
