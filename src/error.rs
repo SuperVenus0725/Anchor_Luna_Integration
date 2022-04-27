@@ -9,6 +9,9 @@ pub enum ContractError {
     #[error("Unauthorized")]
     Unauthorized {},
 
+    #[error("Sum of portion is not 1 ")]
+    PortionError{},
+
     #[error("Not Enough Funds")]
     NotEnough {},
 

@@ -1,16 +1,19 @@
 use cosmwasm_std::{
     entry_point, to_binary,  Binary, Coin, Deps, DepsMut, Env, MessageInfo, Response,
-    StdResult, Uint128,CosmosMsg,WasmMsg
+    StdResult, Uint128,CosmosMsg,WasmMsg,Decimal,QueryRequest,WasmQuery,Decimal256,BankMsg
 };
 
 use cw2::set_contract_version;
+use cw20::{Cw20QueryMsg,BalanceResponse, Cw20ExecuteMsg};
 
 use crate::error::{ContractError};
 use crate::msg::{ ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{State,CONFIG,PRISMFORGE,DENOM};
-use crate::prism::{ExecuteMsg as PrismExecuteMsg};
+use crate::state::{State,CONFIG};
+use crate::anchor::{ExecuteMsg as AnchorExecuteMsg, EpochStateResponse, QueryMsg as AnchorQueryMsg};
 
-const CONTRACT_NAME: &str = "my-wallet";
+use terra_cosmwasm::{create_swap_msg,TerraMsgWrapper};
+
+const CONTRACT_NAME: &str = "Anchor_Luna";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[entry_point]
@@ -21,12 +24,19 @@ pub fn instantiate(
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    deps.api.addr_validate(&msg.owner)?;
+    if msg.anchor_portion+msg.luna_portion != Decimal::one() {
+        return Err(ContractError::PortionError { })
+    }
     let state = State {
-       owner:msg.owner,
-       denom: msg.denom
+       total_deposit:Uint128::new(0),
+       anchor_portion :msg.anchor_portion,
+       luna_portion :msg.luna_portion,
+       anchor_address : msg.anchor_address,
+       token_address : msg.token_address,
+       denom : msg.denom,
+       owner : _info.sender.to_string()
     };
-     CONFIG.save(deps.storage,&state)?;
+    CONFIG.save(deps.storage,&state)?;
     Ok(Response::default())
 }
 
@@ -36,13 +46,14 @@ pub fn execute(
     env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response, ContractError> {
+) -> Result<Response<TerraMsgWrapper>, ContractError> {
     
     match msg {
-       ExecuteMsg::Deposit {} => execute_deposit(deps,env,info),
-       ExecuteMsg::SetOwner {address} => execute_set_owner(deps,env,info,address),
-       ExecuteMsg::ChangeDenom { denom } => execute_change_denom(deps,env,info,denom),
-       ExecuteMsg::SetPrismAddress { address } => execute_set_prism(deps,env,info,address),
+    ExecuteMsg::Deposit {} => execute_deposit(deps,env,info),
+    ExecuteMsg::Withdraw {amount} => execute_withdraw(deps,env,info,amount),
+    ExecuteMsg::SendToWallet { amount }=> execute_send_to_wallet(deps,env,info,amount),
+    ExecuteMsg::SetOwner {address} => execute_set_owner(deps,env,info,address),
+    ExecuteMsg::ChangePortion { anchor_portion,luna_portion } => execute_change_portion(deps,env,info,anchor_portion,luna_portion)
     }
 }
 
@@ -50,33 +61,88 @@ pub fn execute_deposit(
     deps:DepsMut,
     _env:Env,
     info:MessageInfo
-)->Result<Response, ContractError> {
-    let state = CONFIG.load(deps.storage)?;
-    let prism_address = PRISMFORGE.load(deps.storage)?;
-    let deposit_amount  = info
+)->Result<Response<TerraMsgWrapper>, ContractError> {
+    let mut state = CONFIG.load(deps.storage)?;
+    
+    let deposit_amount= info
         .funds
         .iter()
         .find(|c| c.denom == state.denom)
         .map(|c| Uint128::from(c.amount))
         .unwrap_or_else(Uint128::zero);
-    let deposit_coin = Coin{
-        denom:state.denom,
-        amount:deposit_amount};
 
-    DENOM.save(deps.storage,&info.funds[0].denom)?;
- 
-    if deposit_amount == Uint128 :: new(0) {
-        return Err(ContractError::NotEnough { });
-    }
+    let anchor_deposit = deposit_amount*state.anchor_portion;
+    let luna_swap = deposit_amount*state.luna_portion;
+   
+    let  total_deposit = state.total_deposit+ anchor_deposit;
+    state.total_deposit = total_deposit;
 
+    CONFIG.save(deps.storage,&state)?;
+
+    let msg = create_swap_msg(Coin{
+        denom:"uusd".to_string(),
+        amount : luna_swap
+    }, "uluna".to_string());
+
+    
     Ok(Response::new()
         .add_message(CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: prism_address,
-            funds: vec![deposit_coin],
-            msg: to_binary(&PrismExecuteMsg::Deposit {
+            contract_addr: state.anchor_address,
+            funds: vec![Coin{
+                denom:state.denom,
+                amount:anchor_deposit
+            }],
+            msg: to_binary(&AnchorExecuteMsg::DepositStable  {
             })?,
+        }))
+        .add_message(msg)
+    )
+}
+
+pub fn execute_withdraw(
+    _deps:DepsMut,
+    _env:Env,
+    _info:MessageInfo,
+    amount:Uint128
+)->Result<Response<TerraMsgWrapper>, ContractError> {
+    let state = CONFIG.load(_deps.storage)?;
+   
+    Ok(Response::new()
+     .add_message(
+         CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: state.token_address,
+            funds: vec![],
+            msg: to_binary(&Cw20ExecuteMsg::Send {
+                 contract: state.anchor_address, 
+                 amount: amount, 
+                 msg: to_binary(&Cw20QueryMsg::Balance { address: _env.contract.address.to_string() })? })?,
         })
-    ))
+     ))
+}
+
+
+pub fn execute_send_to_wallet(
+    _deps:DepsMut,
+    _env:Env,
+    _info:MessageInfo,
+    amount:Uint128
+)->Result<Response<TerraMsgWrapper>, ContractError> {
+    let state = CONFIG.load(_deps.storage)?;
+    if _info.sender.to_string() != state.owner{
+        return Err(ContractError::Unauthorized { })
+    }
+    Ok(Response::new()
+     .add_message(
+           CosmosMsg::Bank(BankMsg::Send {
+            to_address: _info.sender.to_string(),
+            amount: vec![
+                Coin {
+                    denom: state.denom.clone(),
+                    amount: amount,
+                },
+            ],
+        }),
+     ))
 }
 
 fn execute_set_owner(
@@ -84,7 +150,7 @@ fn execute_set_owner(
     _env:Env,
     info: MessageInfo,
     address: String,
-) -> Result<Response, ContractError> {
+) -> Result<Response<TerraMsgWrapper>, ContractError> {
     let mut state = CONFIG.load(deps.storage)?;
 
     if state.owner != info.sender.to_string() {
@@ -96,32 +162,24 @@ fn execute_set_owner(
     Ok(Response::default())
 }
 
-fn execute_set_prism(
-    deps: DepsMut,
-    _env:Env,
-    info: MessageInfo,
-    address: String,
-) -> Result<Response, ContractError> {
-    let  state = CONFIG.load(deps.storage)?;
-    if state.owner != info.sender.to_string() {
-        return Err(ContractError::Unauthorized {});
-    }
-    deps.api.addr_validate(&address)?;
-    PRISMFORGE.save(deps.storage,&address)?;
-    Ok(Response::default())
-}
 
-fn execute_change_denom(
+fn execute_change_portion(
     deps: DepsMut,
     _env:Env,
     info: MessageInfo,
-    denom: String,
-) -> Result<Response, ContractError> {
+    anchor_portion: Decimal,
+    luna_portion : Decimal
+) -> Result<Response<TerraMsgWrapper>, ContractError> {
     let mut state = CONFIG.load(deps.storage)?;
-    if state.owner != info.sender.to_string() {
-        return Err(ContractError::Unauthorized {});
+    if info.sender.to_string()!=state.owner{
+        return Err(ContractError::Unauthorized { })
+    } 
+
+    if anchor_portion + luna_portion != Decimal::one() {
+        return Err(ContractError::PortionError {  });
     }
-    state.denom = denom;
+    state.anchor_portion = anchor_portion;
+    state.luna_portion = luna_portion;
     CONFIG.save(deps.storage,&state)?;
     Ok(Response::default())
 }
@@ -132,8 +190,8 @@ fn execute_change_denom(
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetStateInfo {} => to_binary(&query_state_info(deps)?),
-        QueryMsg::GetPrismAddress {} => to_binary(&query_prism_address(deps)?),
-        QueryMsg::GetDenom {} => to_binary(&query_denom(deps)?)
+        QueryMsg::GetEpochState {} => to_binary(&query_epoch_state(deps)?),
+        QueryMsg::GetAustBalance {} => to_binary(&query_aust_balance(deps,_env)?),
     }
 }
 
@@ -142,15 +200,23 @@ pub fn query_state_info(deps:Deps) -> StdResult<State>{
     Ok(state)
 }
 
-pub fn query_prism_address(deps:Deps)-> StdResult<String>{
-    let prism_address =  PRISMFORGE.load(deps.storage)?;
-    Ok(prism_address)
+pub fn query_epoch_state(deps:Deps) -> StdResult<EpochStateResponse>{
+    let state = CONFIG.load(deps.storage)?;
+    let epoch_state =   deps.querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+        contract_addr: state.anchor_address,
+        msg: to_binary(&AnchorQueryMsg::EpochState {block_height : None ,distributed_interest :None })?,
+    }))?;
+    Ok(epoch_state)
 }
 
 
-pub fn query_denom(deps:Deps)-> StdResult<String>{
-    let denom =  DENOM.load(deps.storage)?;
-    Ok(denom)
+pub fn query_aust_balance(deps:Deps,env: Env) -> StdResult<BalanceResponse>{
+    let state = CONFIG.load(deps.storage)?;
+    let balance =   deps.querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+        contract_addr: state.token_address,
+        msg: to_binary(&Cw20QueryMsg::Balance {address: env.contract.address.to_string()})?,
+    }))?;
+    Ok(balance)
 }
 
 
@@ -158,57 +224,109 @@ pub fn query_denom(deps:Deps)-> StdResult<String>{
 mod tests {
     use super::*;
     use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{ CosmosMsg, Coin};
+    use cosmwasm_std::{ CosmosMsg, Coin, Uint256,Decimal256};
 
     #[test]
     fn deposit() {
         let mut deps = mock_dependencies(&[]);
-        let instantiate_msg = InstantiateMsg {owner:String::from("creator"),denom:String::from("UST")};
+        let instantiate_msg = InstantiateMsg {
+            anchor_portion:Decimal::from_ratio(8 as u128, 10 as u128),
+            luna_portion:Decimal::from_ratio(2 as u128,10 as u128),
+            anchor_address:"anchor_address".to_string(),
+            denom : "uusd".to_string(),
+            token_address : "token_address".to_string()
+        };
         let info = mock_info("creator", &[]);
         let res = instantiate(deps.as_mut(), mock_env(), info, instantiate_msg).unwrap();
         assert_eq!(0, res.messages.len());
+        let state_info =  query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state_info,State{
+            anchor_portion:Decimal::from_ratio(8 as u128, 10 as u128),
+            luna_portion : Decimal::from_ratio(2 as u128, 10 as u128),
+            anchor_address : "anchor_address".to_string(),
+            token_address :"token_address".to_string(),
+            total_deposit : Uint128::new(0),
+            denom : "uusd".to_string(),
+            owner : "creator".to_string()
+        });
 
         let info = mock_info("creator", &[]);
-        let message = ExecuteMsg::SetPrismAddress {address: "prism".to_string() };
-        execute(deps.as_mut(), mock_env(), info, message).unwrap();
-
-        let address =  query_prism_address(deps.as_ref()).unwrap();
-        assert_eq!(address,"prism");
-
-        let state = query_state_info(deps.as_ref()).unwrap();
-        assert_eq!(state.denom,"UST".to_string());
-
-        let info = mock_info("creator", &[]);
-        let message = ExecuteMsg::SetOwner  {address: "creator1".to_string() };
+        let message = ExecuteMsg::ChangePortion {
+            anchor_portion : Decimal::from_ratio(7 as u128, 10 as u128),
+            luna_portion : Decimal::from_ratio(3 as u128, 10 as u128),
+        };
         execute(deps.as_mut(), mock_env(), info, message).unwrap();
         
-        let state = query_state_info(deps.as_ref()).unwrap();
-        assert_eq!(state.owner,"creator1");
+        let state_info =  query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state_info,State{
+            anchor_portion:Decimal::from_ratio(7 as u128, 10 as u128),
+            luna_portion : Decimal::from_ratio(3 as u128, 10 as u128),
+            anchor_address : "anchor_address".to_string(),
+            token_address : "token_address".to_string(),
+            total_deposit : Uint128::new(0),
+            denom : "uusd".to_string(),
+            owner : "creator".to_string()
+        });
 
-        let info = mock_info("sender",&[Coin{
-            denom:"aaa".to_string(),
-            amount:Uint128::new(10)
-        },Coin{
-            denom:"UST".to_string(),
-            amount:Uint128::new(20)
+        let x = Uint128::new(50);
+        let y = x*Decimal::from_ratio(7 as u128, 10 as u128);
+        assert_eq!(Uint128::new(35),y);
+
+        let info = mock_info("creator", &[Coin{
+              denom:"uusd".to_string(),
+              amount:Uint128::new(50)
         }]);
+        let message = ExecuteMsg::SetOwner { address: "creator1".to_string() } ;
+        execute(deps.as_mut(), mock_env(), info, message).unwrap();
+        let state_info  = query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state_info.owner,"creator1".to_string());
 
-        
-        
+        let info = mock_info("creator", &[Coin{
+              denom:"uusd".to_string(),
+              amount:Uint128::new(50)
+        }]);
         let message = ExecuteMsg::Deposit { };
-         let res= execute(deps.as_mut(), mock_env(), info, message).unwrap();
-        assert_eq!(res.messages.len(),1);
+        let res = execute(deps.as_mut(), mock_env(), info, message).unwrap();
+        let state_info =  query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state_info.total_deposit , Uint128::new(35));
+        assert_eq!(res.messages.len(),2);
         assert_eq!(res.messages[0].msg,
             CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: "prism".to_string(),
+                contract_addr: "anchor_address".to_string(),
                 funds: vec![Coin{
-                    denom:"UST".to_string(),
-                    amount:Uint128::new(20)
+                    denom:"uusd".to_string(),
+                    amount:Uint128::new(35)
                 }],
-                msg: to_binary(&ExecuteMsg::Deposit {
+                msg: to_binary(&AnchorExecuteMsg::DepositStable {
             }).unwrap(),
         }));
-        let denom = query_denom(deps.as_ref()).unwrap();
-        assert_eq!(denom,"aaa");
+        let info = mock_info("creator", &[]);
+        let message = ExecuteMsg::Withdraw { amount: Uint128::new(100) }  ;
+        let res = execute(deps.as_mut(), mock_env(), info, message).unwrap();
+        assert_eq!(1,res.messages.len());
+        assert_eq!(res.messages[0].msg,
+            CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: "token_address".to_string(),
+            funds: vec![],
+            msg: to_binary(&Cw20ExecuteMsg::Send {
+                 contract: "anchor_address".to_string(), 
+                 amount: Uint128::new(100), 
+                 msg: to_binary(&Cw20QueryMsg::Balance { address: mock_env().contract.address.to_string() }).unwrap() }).unwrap(),
+        }));
+
+        let info = mock_info("creator1", &[]);
+        let message = ExecuteMsg::SendToWallet { amount: Uint128::new(100) }  ;
+        let res = execute(deps.as_mut(), mock_env(), info, message).unwrap();
+        assert_eq!(1,res.messages.len());
+        assert_eq!(res.messages[0].msg,
+          CosmosMsg::Bank(BankMsg::Send {
+            to_address: "creator1".to_string(),
+            amount: vec![
+                Coin {
+                    denom: "uusd".to_string(),
+                    amount: Uint128::new(100),
+                },
+            ],
+        }),);
     }
 }

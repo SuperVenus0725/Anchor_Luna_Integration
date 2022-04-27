@@ -2,8 +2,8 @@ use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
 use std::env::current_dir;
 use std::fs::create_dir_all;
 
-use prism_integration::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use prism_integration::state::State;
+use Anchor_Luna_Integration::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use Anchor_Luna_Integration::state::State;
 
 fn main() {
     let mut out_dir = current_dir().unwrap();

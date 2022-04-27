@@ -1,3 +1,4 @@
+use cosmwasm_std::{Uint128, Decimal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use cw_storage_plus::{Item};
@@ -8,7 +9,11 @@ pub const DENOM : Item<String> = Item::new("config_denom");
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct State {
-    pub owner: String,
-    pub denom :String
+    pub total_deposit: Uint128,
+    pub anchor_portion :Decimal,
+    pub token_address : String,
+    pub luna_portion : Decimal,
+    pub anchor_address :String,
+    pub denom : String,
+    pub owner : String
 }
-
