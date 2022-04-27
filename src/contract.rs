@@ -11,7 +11,7 @@ use crate::msg::{ ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::{State,CONFIG};
 use crate::anchor::{ExecuteMsg as AnchorExecuteMsg, EpochStateResponse, QueryMsg as AnchorQueryMsg};
 
-use terra_cosmwasm::{create_swap_msg,TerraMsgWrapper};
+use terra_cosmwasm::{create_swap_send_msg,TerraMsgWrapper};
 
 const CONTRACT_NAME: &str = "Anchor_Luna";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -78,8 +78,10 @@ pub fn execute_deposit(
     state.total_deposit = total_deposit;
 
     CONFIG.save(deps.storage,&state)?;
-
-    let msg = create_swap_msg(Coin{
+ 
+    let msg = create_swap_send_msg (
+    state.owner,
+        Coin{
         denom:"uusd".to_string(),
         amount : luna_swap
     }, "uluna".to_string());
