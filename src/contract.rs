@@ -50,6 +50,7 @@ pub fn execute(
     
     match msg {
     ExecuteMsg::Deposit {} => execute_deposit(deps,env,info),
+    ExecuteMsg::DepositToAnchor {  }=>execute_deposit_to_anchor(deps, env, info),
     ExecuteMsg::Withdraw {amount} => execute_withdraw(deps,env,info,amount),
     ExecuteMsg::SendToWallet { amount }=> execute_send_to_wallet(deps,env,info,amount),
     ExecuteMsg::SetOwner {address} => execute_set_owner(deps,env,info,address),
@@ -98,6 +99,39 @@ pub fn execute_deposit(
             })?,
         }))
         .add_message(msg)
+    )
+}
+
+pub fn execute_deposit_to_anchor(
+    deps:DepsMut,
+    _env:Env,
+    info:MessageInfo
+)->Result<Response<TerraMsgWrapper>, ContractError> {
+    let mut state = CONFIG.load(deps.storage)?;
+    
+    let deposit_amount= info
+        .funds
+        .iter()
+        .find(|c| c.denom == state.denom)
+        .map(|c| Uint128::from(c.amount))
+        .unwrap_or_else(Uint128::zero);
+
+   
+    let  total_deposit = state.total_deposit+ deposit_amount;
+    state.total_deposit = total_deposit;
+
+    CONFIG.save(deps.storage,&state)?;
+    
+    Ok(Response::new()
+        .add_message(CosmosMsg::Wasm(WasmMsg::Execute {
+            contract_addr: state.anchor_address,
+            funds: vec![Coin{
+                denom:state.denom,
+                amount:deposit_amount
+            }],
+            msg: to_binary(&AnchorExecuteMsg::DepositStable  {
+            })?,
+        }))
     )
 }
 
@@ -333,5 +367,24 @@ mod tests {
         }),);
         let state = query_state_info(deps.as_ref()).unwrap();
         assert_eq!(state.total_deposit,Uint128::new(0));
+
+        let info = mock_info("creator", &[Coin{
+              denom:"uusd".to_string(),
+              amount:Uint128::new(50)
+        }]);
+        let message = ExecuteMsg::DepositToAnchor  { };
+        let res = execute(deps.as_mut(), mock_env(), info, message).unwrap();
+        let state_info =  query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state_info.total_deposit , Uint128::new(50));
+        assert_eq!(res.messages[0].msg,
+            CosmosMsg::Wasm(WasmMsg::Execute {
+                contract_addr: "anchor_address".to_string(),
+                funds: vec![Coin{
+                    denom:"uusd".to_string(),
+                    amount:Uint128::new(50)
+                }],
+                msg: to_binary(&AnchorExecuteMsg::DepositStable {
+            }).unwrap(),
+        }));
     }
 }

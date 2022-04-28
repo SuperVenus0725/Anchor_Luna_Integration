@@ -15,6 +15,7 @@ pub struct InstantiateMsg {
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
  Deposit{},
+ DepositToAnchor{},
  Withdraw{amount:Uint128},
  SendToWallet{amount:Uint128},
  SetOwner{address:String},
