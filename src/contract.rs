@@ -11,7 +11,7 @@ use crate::msg::{ ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::{State,CONFIG};
 use crate::anchor::{ExecuteMsg as AnchorExecuteMsg, EpochStateResponse, QueryMsg as AnchorQueryMsg};
 
-use terra_cosmwasm::{create_swap_send_msg,TerraMsgWrapper};
+use terra_cosmwasm::{create_swap_send_msg,TerraMsgWrapper, create_swap_msg};
 
 const CONTRACT_NAME: &str = "Anchor_Luna";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -51,7 +51,7 @@ pub fn execute(
     match msg {
     ExecuteMsg::Deposit {} => execute_deposit(deps,env,info),
     ExecuteMsg::Withdraw {amount} => execute_withdraw(deps,env,info,amount),
-    ExecuteMsg::SendToWallet { amount }=> execute_send_to_wallet(deps,env,info,amount),
+    ExecuteMsg::SendToWallet { amount,denom }=> execute_send_to_wallet(deps,env,info,amount,denom),
     ExecuteMsg::SetOwner {address} => execute_set_owner(deps,env,info,address),
     ExecuteMsg::ChangePortion { anchor_portion,luna_portion } => execute_change_portion(deps,env,info,anchor_portion,luna_portion)
     }
@@ -79,8 +79,7 @@ pub fn execute_deposit(
 
     CONFIG.save(deps.storage,&state)?;
  
-    let msg = create_swap_send_msg (
-    state.owner,
+    let msg = create_swap_msg (
         Coin{
         denom:"uusd".to_string(),
         amount : luna_swap
@@ -127,7 +126,8 @@ pub fn execute_send_to_wallet(
     _deps:DepsMut,
     _env:Env,
     _info:MessageInfo,
-    amount:Uint128
+    amount:Uint128,
+    denom:String,
 )->Result<Response<TerraMsgWrapper>, ContractError> {
     let state = CONFIG.load(_deps.storage)?;
     if _info.sender.to_string() != state.owner{
@@ -139,7 +139,7 @@ pub fn execute_send_to_wallet(
             to_address: _info.sender.to_string(),
             amount: vec![
                 Coin {
-                    denom: state.denom.clone(),
+                    denom: denom,
                     amount: amount,
                 },
             ],
@@ -317,7 +317,7 @@ mod tests {
         }));
 
         let info = mock_info("creator1", &[]);
-        let message = ExecuteMsg::SendToWallet { amount: Uint128::new(100) }  ;
+        let message = ExecuteMsg::SendToWallet { amount: Uint128::new(100),denom:"uluna".to_string() }  ;
         let res = execute(deps.as_mut(), mock_env(), info, message).unwrap();
         assert_eq!(1,res.messages.len());
         assert_eq!(res.messages[0].msg,
@@ -325,7 +325,7 @@ mod tests {
             to_address: "creator1".to_string(),
             amount: vec![
                 Coin {
-                    denom: "uusd".to_string(),
+                    denom: "uluna".to_string(),
                     amount: Uint128::new(100),
                 },
             ],
