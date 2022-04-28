@@ -9,7 +9,7 @@ use cw20::{Cw20QueryMsg,BalanceResponse, Cw20ExecuteMsg};
 use crate::error::{ContractError};
 use crate::msg::{ ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::{State,CONFIG};
-use crate::anchor::{ExecuteMsg as AnchorExecuteMsg, EpochStateResponse, QueryMsg as AnchorQueryMsg};
+use crate::anchor::{ExecuteMsg as AnchorExecuteMsg, EpochStateResponse, QueryMsg as AnchorQueryMsg, Cw20HookMsg};
 
 use terra_cosmwasm::{create_swap_send_msg,TerraMsgWrapper, create_swap_msg};
 
@@ -51,7 +51,7 @@ pub fn execute(
     match msg {
     ExecuteMsg::Deposit {} => execute_deposit(deps,env,info),
     ExecuteMsg::Withdraw {amount} => execute_withdraw(deps,env,info,amount),
-    ExecuteMsg::SendToWallet { amount,denom }=> execute_send_to_wallet(deps,env,info,amount,denom),
+    ExecuteMsg::SendToWallet { amount }=> execute_send_to_wallet(deps,env,info,amount),
     ExecuteMsg::SetOwner {address} => execute_set_owner(deps,env,info,address),
     ExecuteMsg::ChangePortion { anchor_portion,luna_portion } => execute_change_portion(deps,env,info,anchor_portion,luna_portion)
     }
@@ -79,7 +79,8 @@ pub fn execute_deposit(
 
     CONFIG.save(deps.storage,&state)?;
  
-    let msg = create_swap_msg (
+    let msg = create_swap_send_msg (
+        state.owner,
         Coin{
         denom:"uusd".to_string(),
         amount : luna_swap
@@ -106,8 +107,9 @@ pub fn execute_withdraw(
     _info:MessageInfo,
     amount:Uint128
 )->Result<Response<TerraMsgWrapper>, ContractError> {
-    let state = CONFIG.load(_deps.storage)?;
-   
+    let mut state = CONFIG.load(_deps.storage)?;
+    state.total_deposit = Uint128::new(0);
+    CONFIG.save(_deps.storage, &state)?;
     Ok(Response::new()
      .add_message(
          CosmosMsg::Wasm(WasmMsg::Execute {
@@ -116,7 +118,7 @@ pub fn execute_withdraw(
             msg: to_binary(&Cw20ExecuteMsg::Send {
                  contract: state.anchor_address, 
                  amount: amount, 
-                 msg: to_binary(&Cw20QueryMsg::Balance { address: _env.contract.address.to_string() })? })?,
+                 msg: to_binary(&Cw20HookMsg::RedeemStable {})? })?,
         })
      ))
 }
@@ -127,7 +129,6 @@ pub fn execute_send_to_wallet(
     _env:Env,
     _info:MessageInfo,
     amount:Uint128,
-    denom:String,
 )->Result<Response<TerraMsgWrapper>, ContractError> {
     let state = CONFIG.load(_deps.storage)?;
     if _info.sender.to_string() != state.owner{
@@ -139,7 +140,7 @@ pub fn execute_send_to_wallet(
             to_address: _info.sender.to_string(),
             amount: vec![
                 Coin {
-                    denom: denom,
+                    denom: state.denom,
                     amount: amount,
                 },
             ],
@@ -313,11 +314,11 @@ mod tests {
             msg: to_binary(&Cw20ExecuteMsg::Send {
                  contract: "anchor_address".to_string(), 
                  amount: Uint128::new(100), 
-                 msg: to_binary(&Cw20QueryMsg::Balance { address: mock_env().contract.address.to_string() }).unwrap() }).unwrap(),
+                 msg: to_binary(&Cw20HookMsg::RedeemStable {  } ).unwrap() }).unwrap(),
         }));
 
         let info = mock_info("creator1", &[]);
-        let message = ExecuteMsg::SendToWallet { amount: Uint128::new(100),denom:"uluna".to_string() }  ;
+        let message = ExecuteMsg::SendToWallet { amount: Uint128::new(100) }  ;
         let res = execute(deps.as_mut(), mock_env(), info, message).unwrap();
         assert_eq!(1,res.messages.len());
         assert_eq!(res.messages[0].msg,
@@ -325,10 +326,12 @@ mod tests {
             to_address: "creator1".to_string(),
             amount: vec![
                 Coin {
-                    denom: "uluna".to_string(),
+                    denom: "uusd".to_string(),
                     amount: Uint128::new(100),
                 },
             ],
         }),);
+        let state = query_state_info(deps.as_ref()).unwrap();
+        assert_eq!(state.total_deposit,Uint128::new(0));
     }
 }

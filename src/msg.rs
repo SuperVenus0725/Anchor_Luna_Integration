@@ -16,7 +16,7 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
  Deposit{},
  Withdraw{amount:Uint128},
- SendToWallet{amount:Uint128,denom:String},
+ SendToWallet{amount:Uint128},
  SetOwner{address:String},
  ChangePortion {anchor_portion:Decimal,luna_portion:Decimal},
  //SetPrismAddress{address:String}
